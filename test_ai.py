@@ -1,40 +1,48 @@
 import os
-import numpy as np
-import pydicom
-import cv2
-import tensorflow as tf
+import torch
+import torchvision
+from PIL import Image, ImageDraw, ImageFont
+# #FOR CPU
+# pip install torch torchvision torchaudio opencv-python pillow 
+# #FOR GPU
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# pip install opencv-python pillow
+# ---------------- CONFIG ----------------
+MODEL_PATH = "tumor_epoch10.pth"
+IMAGE_PATH = "brain tumor.v1i.tensorflow/test/Te-me_0018_jpg.rf.bdeb58aa519d8b884aa2d69b91a4095d.jpg"
+OUTPUT_DIR = "output"
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+CONF_THRESH = 0.5
 
-IMG_SIZE = 256
-CASES_DIR = "cases"
-MODEL_PATH = "ct_tumor_seg_model.h5"
+model = torchvision.models.detection.fasterrcnn_resnet50_fpn(weights=None)
+num_classes = 2 
+in_features = model.roi_heads.box_predictor.cls_score.in_features
+model.roi_heads.box_predictor = torchvision.models.detection.faster_rcnn.FastRCNNPredictor(in_features, num_classes)
+model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+model.to(DEVICE).eval()
 
-def read_ct_images(ct_folder):
-    imgs = []
-    for fname in sorted(os.listdir(ct_folder)):
-        if fname.endswith(".dcm"):
-            ct = pydicom.dcmread(os.path.join(ct_folder, fname))
-            img = cv2.resize(ct.pixel_array, (IMG_SIZE, IMG_SIZE))
-            img = (img - np.min(img)) / (np.max(img) - np.min(img) + 1e-6)
-            imgs.append(img)
-    return np.array(imgs)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+image = Image.open(IMAGE_PATH).convert("RGB")
+transform = torchvision.transforms.ToTensor()
+img_tensor = transform(image).to(DEVICE)
 
-model = tf.keras.models.load_model(MODEL_PATH)
+with torch.no_grad():
+    pred = model([img_tensor])[0]
 
-for patient in os.listdir(CASES_DIR):
-    ct_folder = os.path.join(CASES_DIR, patient, "CT")
-    ct_images = read_ct_images(ct_folder)
-    ct_images = ct_images[..., np.newaxis]
-    preds = model.predict(ct_images)
-    print(f"Patient {patient}: Prediction shape {preds.shape}")
-    # Logic to save or display segmentation results goes here
+boxes = pred["boxes"].cpu()
+scores = pred["scores"].cpu()
+labels = pred["labels"].cpu()
 
+draw = ImageDraw.Draw(image)
+font = ImageFont.load_default()
 
-import matplotlib.pyplot as plt
-# Example: Show first slice and its mask
-plt.subplot(1,2,1)
-plt.imshow(ct_images[0, ..., 0], cmap='gray')
-plt.title("CT Slice")
-plt.subplot(1,2,2)
-plt.imshow(preds[0, ..., 0] > 0.5, cmap='Reds', alpha=0.5)
-plt.title("Predicted Mask")
-plt.show()
+for box, score, label in zip(boxes, scores, labels):
+    if score < CONF_THRESH:
+        continue
+    x1, y1, x2, y2 = box
+    draw.rectangle([x1, y1, x2, y2], outline="red", width=3)
+    draw.text((x1, y1 - 10), f"Tumor: {score:.2f}", fill="red", font=font)
+
+output_path = os.path.join(OUTPUT_DIR, os.path.basename(IMAGE_PATH))
+image.save(output_path)
+print(f"✅ Saved result to: {output_path}")
